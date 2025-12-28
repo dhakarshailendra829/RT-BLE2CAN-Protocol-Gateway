@@ -1,4 +1,4 @@
-# src/master_gateway.py - ENTERPRISE GRADE CONTROL PANEL
+# src/master_gateway.py - 🏭 ENTERPRISE CONTROL CENTER v2.0
 import tkinter as tk
 from tkinter import ttk, scrolledtext
 import threading
@@ -6,128 +6,184 @@ import subprocess
 import time
 import queue
 import os
+import psutil
+import signal
+import platform
+
+SERVICES = {
+    "BLE_SIM": ["python", "src/ble_receiver.py"],
+    "CAN_GW": ["python", "src/can_translator.py"],
+    "HMI": ["python", "src/dashboard_gui.py"]
+}
 
 class EnterpriseGatewayUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("🏭 BLE-CAN Production Gateway Control Center")
-        self.root.geometry("900x700")
+        self.root.title("🚗 BLE-CAN Production Gateway")
+        self.root.geometry("1100x800")
         self.root.configure(bg="#0d1117")
-        
+
         self.processes = {}
         self.log_queue = queue.Queue()
-        
+        self.start_time = None
+
         self.setup_enterprise_ui()
+
         threading.Thread(target=self.log_display_loop, daemon=True).start()
-    
+        threading.Thread(target=self.system_monitor_loop, daemon=True).start()
+        threading.Thread(target=self.heartbeat_loop, daemon=True).start()
+
+    # ---------------- UI BUILD ---------------- #
     def setup_enterprise_ui(self):
-        # Title Bar
-        title_frame = tk.Frame(self.root, bg="#161b22", height=80)
+        title_frame = tk.Frame(self.root, bg="#161b22", height=90)
         title_frame.pack(fill="x")
-        title_frame.pack_propagate(False)
-        
-        tk.Label(title_frame, text="🚗 BLE-to-CAN Automotive Gateway", 
-                font=("Consolas", 20, "bold"), fg="#58a6ff", bg="#161b22").pack(pady=15)
-        
-        # Control Panel
+        lbl_title = tk.Label(title_frame, text="🚗 AUTOMOTIVE GATEWAY CONTROL",
+                             font=("Segoe UI", 22, "bold"),
+                             fg="#58a6ff", bg="#161b22")
+        lbl_title.pack(side="left", padx=30, pady=20)
+
+        self.status_led = tk.Canvas(title_frame, width=26, height=26,
+                                    bg="#161b22", highlightthickness=0)
+        self.status_led.pack(side="right", padx=20)
+        self.led_circle = self.status_led.create_oval(
+            5, 5, 21, 21, fill="#f85149"
+        )
+
         control_frame = tk.Frame(self.root, bg="#0d1117")
-        control_frame.pack(fill="x", padx=15, pady=10)
-        
-        tk.Button(control_frame, text="🚀 START PRODUCTION", command=self.start_production,
-                 bg="#238636", fg="white", font=("Consolas", 14, "bold"), 
-                 width=18, height=2).pack(side="left", padx=10)
-        
-        tk.Button(control_frame, text="🧪 RUN TESTS", command=self.run_tests,
-                 bg="#dbab09", fg="white", font=("Consolas", 14, "bold"), 
-                 width=15, height=2).pack(side="left", padx=10)
-        
-        tk.Button(control_frame, text="🛑 EMERGENCY STOP", command=self.stop_all,
-                 bg="#da3633", fg="white", font=("Consolas", 14, "bold"), 
-                 width=18, height=2).pack(side="right", padx=10)
-        
-        self.status_label = tk.Label(control_frame, text="⏹️ OFFLINE", 
-                                   fg="#f85149", font=("Consolas", 16, "bold"),
-                                   bg="#0d1117")
-        self.status_label.pack(side="right", padx=20)
-        
-        # Metrics Dashboard
-        metrics_frame = tk.Frame(self.root, bg="#161b22")
-        metrics_frame.pack(fill="x", padx=15, pady=5)
-        
-        self.latency_var = tk.StringVar(value="Latency: --")
-        self.uptime_var = tk.StringVar(value="Uptime: 00:00")
-        tk.Label(metrics_frame, textvariable=self.latency_var, fg="#ffaa00", 
-                font=("Consolas", 12), bg="#161b22").pack(side="left", padx=20)
-        tk.Label(metrics_frame, textvariable=self.uptime_var, fg="#66ccff", 
-                font=("Consolas", 12), bg="#161b22").pack(side="right", padx=20)
-        
-        # Real-time Logs
-        log_frame = tk.Frame(self.root, bg="#0d1117")
-        log_frame.pack(fill="both", expand=True, padx=15, pady=10)
-        
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=20, bg="#161b22",
-                                                 fg="#c9d1d9", font=("Consolas", 10),
-                                                 state="disabled")
+        control_frame.pack(fill="x", padx=30, pady=20)
+
+        tk.Button(control_frame, text="🚀 LAUNCH PRODUCTION",
+                  command=self.start_production,
+                  bg="#238636", fg="white",
+                  font=("Segoe UI", 12, "bold"),
+                  width=22, height=2).grid(row=0, column=0, padx=10)
+
+        tk.Button(control_frame, text="🧪 VALIDATION SUITE",
+                  command=self.run_tests,
+                  bg="#9e6a03", fg="white",
+                  font=("Segoe UI", 12, "bold"),
+                  width=20, height=2).grid(row=0, column=1, padx=10)
+
+        tk.Button(control_frame, text="🛑 SYSTEM STOP",
+                  command=self.stop_all,
+                  bg="#da3633", fg="white",
+                  font=("Segoe UI", 12, "bold"),
+                  width=20, height=2).grid(row=0, column=2, padx=10)
+
+        # Metrics Tiles
+        metrics = tk.Frame(self.root, bg="#0d1117")
+        metrics.pack(fill="x", padx=30)
+
+        self.lat_tile = tk.Label(metrics, text="LATENCY: -- ms",
+                                 bg="#161b22", fg="#ffa657",
+                                 font=("Consolas", 14, "bold"), width=22, pady=15)
+        self.lat_tile.pack(side="left", padx=10)
+
+        self.up_tile = tk.Label(metrics, text="UPTIME: 00:00",
+                                bg="#161b22", fg="#79c0ff",
+                                font=("Consolas", 14, "bold"), width=22, pady=15)
+        self.up_tile.pack(side="left", padx=10)
+
+        self.sys_tile = tk.Label(metrics, text="CPU: --% | RAM: --%",
+                                 bg="#161b22", fg="#3fb950",
+                                 font=("Consolas", 14, "bold"), width=26, pady=15)
+        self.sys_tile.pack(side="right", padx=10)
+
+        log_container = tk.Frame(self.root, bg="#161b22", bd=1)
+        log_container.pack(fill="both", expand=True, padx=40, pady=10)
+        self.log_text = scrolledtext.ScrolledText(
+            log_container, bg="#0d1117", fg="#c9d1d9",
+            font=("Consolas", 11), borderwidth=0
+        )
         self.log_text.pack(fill="both", expand=True)
-    
+
+    # ---------------- LOGGING ---------------- #
     def log(self, message):
         self.log_queue.put(f"[{time.strftime('%H:%M:%S')}] {message}\n")
-    
+
     def log_display_loop(self):
         while True:
             try:
                 msg = self.log_queue.get(timeout=0.1)
-                self.log_text.config(state="normal")
                 self.log_text.insert(tk.END, msg)
                 self.log_text.see(tk.END)
-                self.log_text.config(state="disabled")
             except:
                 pass
-    
+
+    # ---------------- START SERVICES ---------------- #
     def start_production(self):
-        self.log("🎯 LAUNCHING PRODUCTION GATEWAY STACK...")
-        threading.Thread(target=self._start_services, daemon=True).start()
-    
-    def _start_services(self):
-        time.sleep(0.5)
-        self.start_service("BLE_SIM", ["python", "src/ble_receiver.py"])
-        time.sleep(1)
-        self.start_service("CAN_GW", ["python", "src/can_translator.py"])
-        time.sleep(1)
-        self.start_service("HMI", ["python", "src/dashboard_gui.py"])
-        self.status_label.config(text="✅ PRODUCTION ACTIVE", fg="#238636")
-    
+        if self.start_time: return
+        self.start_time = time.time()
+        self.status_led.itemconfig(self.led_circle, fill="#3fb950")
+        self.log("🎯 Production Gateway Online")
+
+        for name, cmd in SERVICES.items():
+            self.start_service(name, cmd)
+            time.sleep(0.4)
+
     def start_service(self, name, cmd):
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, 
-                                  stderr=subprocess.STDOUT, text=True, 
-                                  cwd=".", creationflags=subprocess.CREATE_NEW_CONSOLE)
+            creation_flag = (subprocess.CREATE_NEW_CONSOLE
+                             if platform.system() == "Windows" else 0)
+
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, creationflags=creation_flag
+            )
             self.processes[name] = proc
-            self.log(f"✅ {name} started (PID: {proc.pid})")
+            self.log(f"🟢 {name} launched (PID={proc.pid})")
+
         except Exception as e:
-            self.log(f"❌ {name} FAILED: {e}")
-    
+            self.log(f"❌ {name} failed: {e}")
+
+    # ---------------- MONITORING ---------------- #
+    def system_monitor_loop(self):
+        while True:
+            if not self.start_time: 
+                time.sleep(1)
+                continue
+
+            uptime = int(time.time() - self.start_time)
+            self.up_tile.config(text=f"UPTIME: {uptime//60:02}:{uptime%60:02}")
+
+            cpu = psutil.cpu_percent()
+            ram = psutil.virtual_memory().percent
+            self.sys_tile.config(text=f"CPU: {cpu}% | RAM: {ram}%")
+
+            time.sleep(1)
+
+    def heartbeat_loop(self):
+        while True:
+            for name, proc in list(self.processes.items()):
+                if proc.poll() is not None:  # crashed
+                    self.log(f"🔁 RESTARTING {name} (Crash Detected)")
+                    self.start_service(name, SERVICES[name])
+            time.sleep(2)
+
+    # ---------------- TEST RUN ---------------- #
     def run_tests(self):
-        self.log("🧪 EXECUTING AUTOMOTIVE VALIDATION SUITE...")
-        threading.Thread(target=lambda: subprocess.run(["python", "tests/test_latency.py"], 
-                                                      cwd="."), daemon=True).start()
-    
+        self.log("🧪 Running Validation Suite...")
+        threading.Thread(target=lambda:
+            subprocess.run(["python", "tests/test_latency.py"]), daemon=True
+        ).start()
+
+    # ---------------- SAFE SHUTDOWN ---------------- #
     def stop_all(self):
-        self.log("🛑 EMERGENCY SHUTDOWN...")
-        for name, proc in list(self.processes.items()):
+        self.log("🔻 Power Down - Complete Shutdown")
+        self.status_led.itemconfig(self.led_circle, fill="#f85149")
+
+        for name, proc in self.processes.items():
             try:
-                proc.terminate()
-                self.log(f"🛑 {name} terminated")
-            except:
-                pass
+                p = psutil.Process(proc.pid)
+                for child in p.children(recursive=True):
+                    child.terminate()
+                p.terminate()
+                self.log(f"🔴 {name} Stopped")
+            except: pass
         self.processes.clear()
-        self.status_label.config(text="⏹️ OFFLINE", fg="#f85149")
-    
-    def read_output(self, name, proc):
-        for line in iter(proc.stdout.readline, ''):
-            self.log(f"{name}: {line.strip()}")
+        self.start_time = None
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = EnterpriseGatewayUI(root)
+    EnterpriseGatewayUI(root)
     root.mainloop()
